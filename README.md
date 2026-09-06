@@ -83,6 +83,5 @@ it's an independent tool that happens to be useful for Kindle owners.
 
 ## License
 
-Not yet chosen — pick one that fits (e.g. MIT or Apache-2.0) before
-publishing, and I can generate the `LICENSE` file for you if you tell me
-which.
+This is free and unencumbered software released into the public domain
+under [The Unlicense](https://unlicense.org). See `LICENSE` for the full text.
