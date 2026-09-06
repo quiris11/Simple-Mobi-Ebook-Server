@@ -32,6 +32,7 @@ import re
 import shutil
 import socket
 import sys
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, quote
 
@@ -93,6 +94,35 @@ def list_mobi_files(folder):
                 results.append(rel)
     results.sort(key=str.lower)
     return results
+
+
+def content_disposition_header(filename):
+    """Build a Content-Disposition value that's safe to hand to
+    send_header(), which encodes as latin-1. Book titles routinely
+    contain non-latin-1 characters (Polish 'l with stroke', 'z with
+    dot', etc.), which would otherwise raise UnicodeEncodeError and
+    kill the request thread.
+
+    We deliberately send a single, plain ASCII `filename="..."` and
+    nothing fancier. An earlier version of this also added the RFC 6266
+    `filename*=UTF-8''...` extension so modern clients would see the
+    exact original name - but the Kindle 4's "Basic Web Browser" download
+    manager can't parse that two-parameter header and resets the
+    connection as soon as it sees it. Plain ASCII is the one thing every
+    HTTP client, however old, is guaranteed to handle, so accented
+    letters are transliterated to their closest ASCII equivalent (Polish
+    l-with-stroke becomes plain 'l', etc.) instead of being dropped."""
+    # Polish letters that don't decompose under NFKD (l-with-stroke has
+    # no accent to strip - it's a distinct base letter) get a manual
+    # mapping; everything else (a-ogonek, c-acute, z-dot, etc.) is
+    # handled generically by NFKD + stripping combining marks below.
+    filename = filename.replace("\u0142", "l").replace("\u0141", "L")
+    decomposed = unicodedata.normalize("NFKD", filename)
+    ascii_name = decomposed.encode("ascii", "ignore").decode("ascii")
+    # Anything still non-ASCII (other alphabets, emoji, ...) becomes '_'.
+    ascii_name = "".join(c if 32 <= ord(c) < 127 else "_" for c in ascii_name)
+    ascii_name = ascii_name.replace('"', "_").replace("\\", "_").strip() or "book.mobi"
+    return f'attachment; filename="{ascii_name}"'
 
 
 def make_handler(folder):
@@ -165,7 +195,7 @@ def make_handler(folder):
                         self.send_response(200)
                         self.send_header("Content-Length", str(length))
                     self.send_header("Content-Type", MOBI_MIME)
-                    self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+                    self.send_header("Content-Disposition", content_disposition_header(download_name))
                     self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
 
