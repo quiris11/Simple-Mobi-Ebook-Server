@@ -70,12 +70,9 @@ and bookmark it on the Kindle — that way you only type it once.
 1. Connect the Kindle to the same Wi-Fi network as the computer running the server.
 2. Open **Menu → Experimental → Basic Web Browser** (naming may vary slightly by firmware version).
 3. Type in the address the script printed, e.g. `http://192.168.1.23:8000/`.
-4. Tap a book title. For an `.epub` that hasn't been converted yet you'll
-   first see a "Converting…" page that reloads itself every few seconds;
-   once the book is ready it shows a **Download** link — tap it. (The page
-   deliberately doesn't start the download by itself: when the Kindle's
-   browser gets a book in answer to an automatic reload, it downloads it
-   but then stays stuck "loading" the page.) The Kindle should download it and offer to open/save it.
+4. Tap a book title. For an `.epub` you'll first see a "Converting…" page
+   that reloads itself every few seconds; the download starts on its own
+   once the book is ready. The Kindle should download it and offer to open/save it.
    If it doesn't show up on the Home screen right away, try
    **Home → Menu → "Sync and Check for Items"**, or restart the device.
 
