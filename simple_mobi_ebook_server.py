@@ -68,7 +68,10 @@ TOKEN_LENGTH = 12
 # URL prefix for .epub books served as converted .mobi, e.g.
 # "/_convert/Sci-Fi/Dune.epub.mobi". The URL must end in ".mobi": the
 # Kindle's download manager goes by the extension and won't fetch .epub.
+# Until the book is converted, that URL redirects to its status page,
+# e.g. "/_status/Sci-Fi/Dune.epub.html".
 CONVERT_PREFIX = "/_convert/"
+STATUS_PREFIX = "/_status/"
 CONVERT_TIMEOUT = 600  # seconds; kindlegen on a huge, image-heavy book is slow
 WAIT_REFRESH = 5  # seconds between "still converting" page reloads
 DROPPED = (ConnectionResetError, BrokenPipeError, TimeoutError)
@@ -205,6 +208,15 @@ class EpubConverter:
         key = f"{epub_path}\0{st.st_mtime_ns}\0{st.st_size}"
         digest = hashlib.sha1(key.encode("utf-8", "surrogateescape")).hexdigest()
         return os.path.join(self.cache_dir, digest + ".mobi")
+
+    def ready_path(self, epub_path):
+        """Path of the converted .mobi if it's ready, else None. Unlike
+        status(), never starts a conversion or consumes a failure."""
+        dest = self._cache_path(epub_path)
+        with self._lock:
+            if dest not in self._running and os.path.isfile(dest):
+                return dest
+        return None
 
     def status(self, epub_path):
         """Return ("ready", mobi_path), ("converting", None) or
@@ -395,30 +407,67 @@ def make_handler(folder, token, converter):
                 return
             self._send_file(real_path, os.path.basename(real_path))
 
+        def _redirect(self, code, location):
+            self.send_response(code)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _resolve_epub(self, rel_path, suffix):
+            """For "<path of the epub><suffix>" return (epub_rel, epub_path),
+            or send a 404 and return None."""
+            epub_rel = rel_path[:-len(suffix)] if rel_path.lower().endswith(suffix) else ""
+            epub_path = resolve(epub_rel, ".epub") if converter else None
+            if epub_path is None:
+                self.send_error(404, "File not found")
+                return None
+            return epub_rel, epub_path
+
         def _send_converted(self, rel_path):
             # rel_path is "<path of the epub>.mobi", e.g. "Sci-Fi/Dune.epub.mobi".
-            epub_rel = rel_path[:-5] if rel_path.lower().endswith(".mobi") else ""
-            epub_path = resolve(epub_rel, ".epub")
-            if converter is None or epub_path is None:
-                self.send_error(404, "File not found")
+            found = self._resolve_epub(rel_path, ".mobi")
+            if found is None:
                 return
+            epub_rel, epub_path = found
+            mobi_path = converter.ready_path(epub_path)
+            if mobi_path:
+                self._send_file(mobi_path, os.path.basename(epub_path)[:-5] + ".mobi")
+            else:
+                self._redirect(302, base + STATUS_PREFIX + quote(epub_rel) + ".html")
 
+        def _send_status(self, rel_path):
+            # rel_path is "<path of the epub>.html", e.g. "Sci-Fi/Dune.epub.html".
+            # This page never serves the book itself: when the Kindle's
+            # browser gets a file in answer to a meta refresh, it hands it
+            # to the download manager but stays stuck "loading" the page.
+            # Once the book is ready, it gets a plain link instead - the
+            # same thing as clicking a .mobi on the list, which works fine.
+            found = self._resolve_epub(rel_path, ".html")
+            if found is None:
+                return
+            epub_rel, epub_path = found
             title = os.path.basename(epub_path)
+            self_link = f'<a href="{html.escape(base + STATUS_PREFIX + quote(epub_rel), quote=True)}.html">'
+            back_link = f'<a href="{base}/">Back to the list</a>'
             state, result = converter.status(epub_path)
             if state == "ready":
-                self._send_file(result, title[:-5] + ".mobi")
+                size_mb = os.path.getsize(result) / (1024 * 1024)
+                href = base + CONVERT_PREFIX + quote(epub_rel) + ".mobi"
+                self._send_html(
+                    "Ready",
+                    f"<h1>{html.escape(title)} is ready</h1>"
+                    f'<p><a href="{html.escape(href, quote=True)}">Download '
+                    f"{html.escape(title[:-5])}.mobi</a> &nbsp;({size_mb:.1f} MB)</p>"
+                    f"<p>{back_link}</p>",
+                )
             elif state == "converting":
-                # The Kindle 4's browser honors meta refresh: it keeps
-                # reloading this URL until the .mobi is ready, then hands
-                # the response to its download manager like any other book.
                 self._send_html(
                     "Converting...",
                     f"<h1>Converting {html.escape(title)}</h1>"
-                    f"<p>This page reloads every {WAIT_REFRESH} seconds and the "
-                    "download starts by itself once the book is ready - usually "
-                    "within a minute.</p>"
-                    f'<p><a href="{html.escape(self.path, quote=True)}">Reload now</a>'
-                    f' &nbsp; <a href="{base}/">Back to the list</a></p>',
+                    f"<p>This page reloads every {WAIT_REFRESH} seconds and shows "
+                    "a download link once the book is ready - usually within "
+                    "a minute.</p>"
+                    f"<p>{self_link}Reload now</a> &nbsp; {back_link}</p>",
                     head=f'<meta http-equiv="refresh" content="{WAIT_REFRESH}">',
                 )
             else:
@@ -426,8 +475,7 @@ def make_handler(folder, token, converter):
                     "Conversion failed",
                     f"<h1>Could not convert {html.escape(title)}</h1>"
                     f"<pre>{html.escape(result)}</pre>"
-                    f'<p><a href="{html.escape(self.path, quote=True)}">Try again</a>'
-                    f' &nbsp; <a href="{base}/">Back to the list</a></p>',
+                    f"<p>{self_link}Try again</a> &nbsp; {back_link}</p>",
                 )
 
         def do_GET(self):
@@ -443,10 +491,7 @@ def make_handler(folder, token, converter):
                     self.send_error(404, "File not found")
                     return
                 if not slash:
-                    self.send_response(301)
-                    self.send_header("Location", f"{base}/")
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
+                    self._redirect(301, f"{base}/")
                     return
                 path = "/" + rest
 
@@ -455,6 +500,8 @@ def make_handler(folder, token, converter):
                 self._send_index(query)
             elif path.startswith(CONVERT_PREFIX):
                 self._send_converted(unquote(path[len(CONVERT_PREFIX):]))
+            elif path.startswith(STATUS_PREFIX):
+                self._send_status(unquote(path[len(STATUS_PREFIX):]))
             else:
                 self._send_mobi(unquote(path.lstrip("/")))
 
